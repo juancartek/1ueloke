@@ -178,6 +178,23 @@ async fn main() {
         }
     };
 
+    println!("   {} Selecciona la Intensidad:", "⚡".yellow());
+    println!("   {} {}  {}  -  Para routers normales (Seguro)", " [1]".green(), "🏠", "HOME".white());
+    println!("   {} {}  {}  -  Para fibra óptica (Rápido)", " [2]".yellow(), "🚀", "PRO".white());
+    println!("   {} {}  {}  -  Para VPS/Dedicados (Extremo)", " [3]".red(), "🔥", "NITRO".white());
+    println!();
+    print!("   {} Intensidad > ", "👉".yellow());
+    let _ = std::io::stdout().flush();
+    
+    let mut int_input = String::new();
+    std::io::stdin().read_line(&mut int_input).expect("Error");
+    let intensity = match int_input.trim() {
+        "1" => 5_000,
+        "2" => 25_000,
+        "3" => 400_000,
+        _ => 10_000,
+    };
+
     println!("\n   {} {}", "🔥".red(), "Iniciando motor GIGA-NITRO...".yellow());
     let start_time = Instant::now();
 
@@ -195,13 +212,13 @@ async fn main() {
     ];
 
     let (tx, mut rx) = mpsc::channel(100000);
-    let semaphore = Arc::new(Semaphore::new(400000)); 
+    let semaphore = Arc::new(Semaphore::new(intensity)); 
     let cidrs = Arc::new(target_cidrs);
     let total_scanned = Arc::new(AtomicU64::new(0));
     let total_found = Arc::new(AtomicU64::new(0));
     let scanning = Arc::new(AtomicBool::new(true));
 
-    for _ in 0..400000 {
+    for _ in 0..intensity {
         let sem = semaphore.clone();
         let cidrs = cidrs.clone();
         let tx = tx.clone();
