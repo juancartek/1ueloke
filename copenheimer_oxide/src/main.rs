@@ -1,297 +1,328 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
-use tokio::sync::{mpsc, Semaphore};
-use tokio::time::timeout;
-use serde_json::Value;
-use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
-use std::fs::OpenOptions;
-use std::io::{Write, BufRead};
-use rand::Rng;
-use std::env;
-use dns_lookup::lookup_addr;
+/// COPENHEIMER - Ultra-fast Minecraft Server Scanner
+///
+/// Escáner masivo de servidores Minecraft con soporte para hasta 400,000
+/// conexiones concurrentes usando Tokio.
 
-const MC_PORT: u16 = 25565;
-
-fn format_count(count: u64) -> String {
-    if count >= 1_000_000_000_000 {
-        format!("{:.2}T", count as f64 / 1_000_000_000_000.0)
-    } else if count >= 1_000_000_000 {
-        format!("{:.2}B", count as f64 / 1_000_000_000.0)
-    } else if count >= 1_000_000 {
-        format!("{:.2}M", count as f64 / 1_000_000.0)
-    } else if count >= 1_000 {
-        format!("{:.2}K", count as f64 / 1_000.0)
-    } else {
-        count.to_string()
-    }
-}
-
-#[derive(Debug, Clone)]
-struct CIDR {
-    net: u32,
-    size: u32,
-    provider: &'static str,
-}
-
-impl CIDR {
-    fn new(ip: &str, bits: u8, provider: &'static str) -> Self {
-        let addr: Ipv4Addr = ip.parse().unwrap();
-        let net = u32::from(addr);
-        let size = 1u32 << (32 - bits);
-        Self { net, size, provider }
-    }
-}
-
+use copenheimer_oxide::cidr::load_cidr_ranges;
+use copenheimer_oxide::config::Config;
+use copenheimer_oxide::export::{ExportFormat, Exporter};
+use copenheimer_oxide::scanner::{ProgressMonitor, Scanner, ScannerConfig};
+use copenheimer_oxide::server::check_server;
+use copenheimer_oxide::ui;
+use copenheimer_oxide::updater;
+#[cfg(feature = "mongodb")]
+use copenheimer_oxide::database::{self, DatabaseClient};
 use colored::*;
-
-const LOGO: &str = r#"
-   ____  _____  ____  ____  _      _      ____  _____  ____  ____  ____ 
-  /  _ \/  __/ /  _ \/  _ \/ \  /|/ \__/|/  _ \/__ __\/  _ \/  _ \/  _ \
-  | / \||  \   | / \|| | //| |\ ||| |\/||| / \|  / \  | | //| / \|| | //
-  | \_/||  /_  | \_/|| |_\\| | \||| |  ||| \_/|  | |  | |_\\| \_/|| |_\\
-  \____/\____\ \____/\____/\_/  \|\_/  \|\____/  \_/  \____/\____/\____/
-"#;
-
-fn print_logo() {
-    println!("{}", "   ╔══════════════════════════════════════════════════════════════════════════╗".red().bold());
-    println!("   ║ {} ║", r"      __  ____   standard  ____  _   _  _____  ____   ____        ".red().bold());
-    println!("   ║ {} ║", r"     / / / / /  /_  __/ __ \/ | / / /_  __/ __ \/ __ \       ".red().bold());
-    println!("   ║ {} ║", r"    / / / / /    / / / /_/ /  |/ /   / / / /_/ / / / /       ".red().bold());
-    println!("   ║ {} ║", r"   / /_/ / /___ / / / _, _/ /|  /   / / / _, _/ /_/ /        ".red().bold());
-    println!("   ║ {} ║", r"   \____/_____//_/ /_/ |_/_/ |_/   /_/ /_/ |_|\____/         ".red().bold());
-    println!("   ║                                                                          ║");
-    println!("   ║  {}  {} v5.6.0 | OXIDE ENGINE          ║", "🚀".red(), "COPENHEIMER ULTRA-NITRO".white().bold());
-    println!("{}", "   ╚══════════════════════════════════════════════════════════════════════════╝".red().bold());
-    println!();
-    println!("   {} {}", "🔥".red(), "Iniciando escaneo masivo...".yellow());
-}
-
-fn clean_motd(desc: &Value) -> String {
-    let mut raw = String::new();
-    if let Some(text) = desc.as_str() {
-        raw = text.to_string();
-    } else if let Some(obj) = desc.as_object() {
-        if let Some(text) = obj.get("text").and_then(|v| v.as_str()) {
-            raw.push_str(text);
-        }
-        if let Some(extra) = obj.get("extra").and_then(|v| v.as_array()) {
-            for part in extra {
-                if let Some(t) = part.get("text").and_then(|v| v.as_str()) {
-                    raw.push_str(t);
-                }
-            }
-        }
-    }
-    raw.chars().filter(|c| !c.is_control() && *c != '§').collect::<String>().replace('\n', " ").trim().to_string()
-}
-
-async fn check_server(ip: Ipv4Addr) -> Option<(Value, String)> {
-    let addr = SocketAddr::new(IpAddr::V4(ip), MC_PORT);
-    let mut stream = match timeout(Duration::from_millis(150), TcpStream::connect(addr)).await {
-        Ok(Ok(s)) => s,
-        _ => return None,
-    };
-
-    let ip_str = ip.to_string();
-    let mut handshake = vec![0x00];
-    handshake.extend_from_slice(&[0x2F]); 
-    handshake.push(ip_str.len() as u8);
-    handshake.extend_from_slice(ip_str.as_bytes());
-    handshake.extend_from_slice(&[0x63, 0xDD]); 
-    handshake.push(0x01); 
-
-    let mut packet = vec![handshake.len() as u8];
-    packet.extend(handshake);
-    packet.extend_from_slice(&[0x01, 0x00]); 
-
-    if stream.write_all(&packet).await.is_err() { return None; }
-
-    let mut buf = vec![0; 8192];
-    let n = match timeout(Duration::from_millis(400), stream.read(&mut buf)).await {
-        Ok(Ok(n)) if n > 10 => n,
-        _ => return None,
-    };
-
-    let res_str = String::from_utf8_lossy(&buf[..n]);
-    if let Some(json_start) = res_str.find('{') {
-        if let Ok(json) = serde_json::from_str::<Value>(&res_str[json_start..]) {
-            let domain = lookup_addr(&IpAddr::V4(ip)).unwrap_or_else(|_| "N/A".to_string());
-            return Some((json, domain));
-        }
-    }
-    None
-}
+use std::env;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::time::sleep;
 
 #[tokio::main]
 async fn main() {
-    loop {
-        print_logo();
-        let args: Vec<String> = env::args().collect();
-        // ... (resto del menú)
+    // Manejar argumentos de línea de comandos
+    let args: Vec<String> = env::args().collect();
 
-    // MODO CHECK: Para actualizar datos de una IP específica
+    // Modo de verificación de actualizaciones
+    if args.len() > 1 && args[1] == "--check-updates" {
+        handle_check_updates().await;
+        return;
+    }
+
+    // Modo de actualización automática
+    if args.len() > 1 && args[1] == "--update" {
+        handle_update().await;
+        return;
+    }
+
+    // Modo de verificación de servidor único
     if args.len() > 2 && args[1] == "--check" {
-        if let Ok(ip) = args[2].parse::<Ipv4Addr>() {
-            if let Some((info, domain)) = check_server(ip).await {
-                let motd = clean_motd(&info["description"]);
-                let online = info["players"]["online"].as_i64().unwrap_or(0);
-                let max = info["players"]["max"].as_i64().unwrap_or(0);
-                let version = info["version"]["name"].as_str().unwrap_or("Unknown");
-                println!("{}", "   ╭──────────────────────────────────────────────────────────────────────────╮".red());
-                println!("   🔥  IP: {:<15} 🏢  HOST: {:<20}", ip.to_string().cyan(), domain.yellow());
-                println!("   🛠️   VER: {:<15} 👥  PLAYERS: {}/{}", version.green(), online.to_string().white(), max.to_string().white());
-                println!("   📝  MOTD: {:<50}", motd.white());
-                println!("{}", "   ╰──────────────────────────────────────────────────────────────────────────╯".red());
-            } else {
-                println!("{}", "OFFLINE".red());
-            }
+        if let Ok(ip) = args[2].parse() {
+            handle_check_mode(ip).await;
+        } else {
+            eprintln!("❌ IP inválida: {}", args[2]);
         }
         return;
     }
 
-    println!("   {} Selecciona una opción:", "🎮".red());
-    println!("   {} {}  {}  -  Búsqueda ilimitada", " [1]".red(), "🚀".green(), "Quick Scan".white());
-    println!("   {} {}  {}  -  Buscar N servidores y parar", " [2]".red(), "🎯".cyan(), "Target Mode".white());
-    println!();
-    print!("   {} Opción > ", "👉".red());
-    let _ = std::io::stdout().flush();
+    // Loop principal del menú
+    loop {
+        ui::print_logo();
 
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input).expect("Error leyendo entrada");
-    let choice = input.trim();
-
-    let limit_arg: Option<u64> = match choice {
-        "1" => None,
-        "2" => {
-            print!("   {} Cuántos servidores quieres encontrar? > ", "🔢".yellow());
-            let _ = std::io::stdout().flush();
-            let mut limit_input = String::new();
-            std::io::stdin().read_line(&mut limit_input).expect("Error leyendo límite");
-            limit_input.trim().parse().ok()
-        }
-        _ => {
-            println!("   {} Opción no válida. Iniciando Quick Scan por defecto...", "⚠️".yellow());
-            None
-        }
-    };
-
-    println!("   {} Selecciona la Intensidad:", "⚡".yellow());
-    println!("   {} {}  {}  -  Para routers normales (Seguro)", " [1]".green(), "🏠", "HOME".white());
-    println!("   {} {}  {}  -  Para fibra óptica (Rápido)", " [2]".yellow(), "🚀", "PRO".white());
-    println!("   {} {}  {}  -  Para VPS/Dedicados (Extremo)", " [3]".red(), "🔥", "NITRO".white());
-    println!();
-    print!("   {} Intensidad > ", "👉".yellow());
-    let _ = std::io::stdout().flush();
-    
-    let mut int_input = String::new();
-    std::io::stdin().read_line(&mut int_input).expect("Error");
-    let intensity = match int_input.trim() {
-        "1" => 5_000,
-        "2" => 25_000,
-        "3" => 400_000,
-        _ => 10_000,
-    };
-
-    println!("\n   {} {}", "🔥".red(), "Iniciando motor GIGA-NITRO...".yellow());
-    let start_time = Instant::now();
-
-    let target_cidrs = vec![
-        CIDR::new("181.0.0.0", 8, "Residencial LATAM"),
-        CIDR::new("190.0.0.0", 8, "Residencial LATAM"),
-        CIDR::new("200.0.0.0", 8, "Residencial LATAM"),
-        CIDR::new("70.0.0.0", 8, "Residencial US"),
-        CIDR::new("80.0.0.0", 8, "Residencial EU"),
-        CIDR::new("51.254.0.0", 15, "OVH Game"),
-        CIDR::new("144.76.0.0", 16, "Hetzner DE"),
-        CIDR::new("129.146.0.0", 16, "Oracle Cloud US"),
-        CIDR::new("150.136.0.0", 16, "Oracle Cloud US"),
-        CIDR::new("37.187.0.0", 16, "Aternos/OVH"),
-    ];
-
-    let (tx, mut rx) = mpsc::channel(100000);
-    let semaphore = Arc::new(Semaphore::new(intensity)); 
-    let cidrs = Arc::new(target_cidrs);
-    let total_scanned = Arc::new(AtomicU64::new(0));
-    let total_found = Arc::new(AtomicU64::new(0));
-    let scanning = Arc::new(AtomicBool::new(true));
-
-    for _ in 0..intensity {
-        let sem = semaphore.clone();
-        let cidrs = cidrs.clone();
-        let tx = tx.clone();
-        let ts = total_scanned.clone();
-        let sc = scanning.clone();
-
-        tokio::spawn(async move {
-            loop {
-                if !sc.load(Ordering::Relaxed) { break; }
-                let _permit = match sem.acquire().await { Ok(p) => p, Err(_) => break };
-                let (ip, cidr_info) = {
-                    let mut rng = rand::thread_rng();
-                    let idx = rng.gen_range(0..cidrs.len());
-                    let cidr = &cidrs[idx];
-                    let ip_int = cidr.net + rng.gen_range(0..cidr.size);
-                    (Ipv4Addr::from(ip_int), cidr.clone())
-                };
-                if let Some((info, domain)) = check_server(ip).await {
-                    if tx.send((ip, info, cidr_info, domain)).await.is_err() {
-                        break;
+        // Verificar actualizaciones en segundo plano (solo la primera vez)
+        static UPDATE_CHECKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !UPDATE_CHECKED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            // Verificar de forma sincrónica en el primer inicio
+            if let Ok(info) = tokio::runtime::Handle::current().block_on(updater::check_for_updates()) {
+                if info.update_available {
+                    updater::display_update_info(&info);
+                    
+                    if updater::prompt_update() {
+                        println!();
+                        match tokio::runtime::Handle::current().block_on(updater::run_updater()) {
+                            Ok(_) => {
+                                println!();
+                                println!("{}", "═══════════════════════════════════════════════════".green());
+                                println!("{}", "   ✅ Actualización completada exitosamente".green().bold());
+                                println!("{}", "   🔄 Reiniciando el programa...".cyan());
+                                println!("{}", "═══════════════════════════════════════════════════".green());
+                                std::process::exit(0);
+                            }
+                            Err(e) => {
+                                eprintln!();
+                                eprintln!("{}", "═══════════════════════════════════════════════════".red());
+                                eprintln!("{} {}", "   ❌ Error durante la actualización:".red(), e);
+                                eprintln!("{}", "   💡 Intenta más tarde o usa: ./copenheimer_oxide --update".yellow());
+                                eprintln!("{}", "═══════════════════════════════════════════════════".red());
+                                println!();
+                                ui::pause();
+                            }
+                        }
+                    } else {
+                        println!("{}", "   ⏭️  Omitiendo actualización por ahora...".yellow());
+                        println!();
+                        sleep(Duration::from_millis(1500)).await;
                     }
                 }
-                ts.fetch_add(1, Ordering::Relaxed);
-                drop(_permit);
             }
-        });
-    }
-
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("hits_omega.txt")
-        .expect("No se pudo abrir hits_omega.txt");
-
-    let mut return_to_menu = false;
-    while let Some((ip, info, cidr, domain)) = rx.recv().await {
-        let motd = clean_motd(&info["description"]);
-        let online = info["players"]["online"].as_i64().unwrap_or(0);
-        let max = info["players"]["max"].as_i64().unwrap_or(0);
-        let version = info["version"]["name"].as_str().unwrap_or("Unknown");
-        let current_hits = total_found.fetch_add(1, Ordering::Relaxed) + 1;
-        
-        let log_entry = format!("🔥 IP: {} | DOMAIN: {} | HOST: {} | VER: {} | PLAYERS: {}/{} | MOTD: {}", ip, domain, cidr.provider, version, online, max, motd);
-        
-        println!("{}", "   ╭──────────────────────────────────────────────────────────────────────────╮".red());
-        println!("   🔥  IP: {:<15} 🏢  HOST: {:<20}", ip.to_string().cyan(), cidr.provider.yellow());
-        println!("   🛠️   VER: {:<15} 👥  PLAYERS: {}/{}", version.green(), online.to_string().white(), max.to_string().white());
-        println!("   📝  MOTD: {:<50}", motd.white());
-        println!("{}", "   ╰──────────────────────────────────────────────────────────────────────────╯".red());
-
-        if let Err(e) = writeln!(file, "{}", log_entry) {
-            eprintln!("Error escribiendo en hits_omega.txt: {}", e);
         }
 
-        if let Some(l) = limit_arg {
-            if current_hits >= l {
-                scanning.store(false, Ordering::Relaxed);
+        // Cargar configuración con fallback a default hardcoded
+        let config = Config::default().unwrap_or_else(|_| create_default_config());
+
+        // Mostrar menú principal
+        ui::print_main_menu();
+        let choice = ui::read_input("   👉 Opción > ");
+
+        // Determinar modo de escaneo
+        let target_count: Option<u64> = match choice.as_str() {
+            "1" => None, // Quick Scan - ilimitado
+            "2" => {
+                let input = ui::read_input("   🔢 Cuántos servidores quieres encontrar? > ");
+                input.parse().ok()
+            }
+            _ => {
+                println!("   ⚠️  Opción no válida. Iniciando Quick Scan por defecto...");
+                None
+            }
+        };
+
+        // Seleccionar intensidad
+        ui::print_intensity_menu();
+        let intensity_input = ui::read_input("   👉 Intensidad > ");
+        let workers = config.get_workers_for_intensity(&intensity_input);
+
+        ui::show_scan_start(workers);
+
+        // Cargar rangos CIDR
+        let cidrs = match load_cidr_ranges(&config.cidr_ranges.ranges) {
+            Ok(cidrs) => cidrs,
+            Err(e) => {
+                eprintln!("❌ Error cargando rangos CIDR: {}", e);
+                ui::pause();
+                continue;
+            }
+        };
+
+        // Crear configuración del escáner
+        let scanner_config = ScannerConfig {
+            workers,
+            timeout_ms: config.scan.timeout_ms,
+            read_timeout_ms: config.scan.read_timeout_ms,
+            target_count,
+        };
+
+        // Crear escáner
+        let scanner = Arc::new(Scanner::new(scanner_config, cidrs));
+        let mut rx = scanner.start().await;
+
+        // Crear exportador
+        let export_format = ExportFormat::from_str(&config.output.format);
+        let mut exporter = Exporter::new(export_format, config.output.file.clone());
+
+        // Inicializar cliente de base de datos si está configurado
+        #[cfg(feature = "mongodb")]
+        let db_client = {
+            if let Some(db_config) = database::load_database_config() {
+                match DatabaseClient::new(db_config).await {
+                    Ok(client) => {
+                        if client.is_enabled() {
+                            if let Ok(stats) = client.get_stats().await {
+                                println!("   📊 Base de datos: {} servidores almacenados", stats.total_servers);
+                            }
+                        }
+                        Some(Arc::new(client))
+                    }
+                    Err(e) => {
+                        eprintln!("   ⚠️  Error conectando a BD: {}", e);
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        };
+        #[cfg(not(feature = "mongodb"))]
+        let _db_client: Option<Arc<()>> = None;
+
+        // Crear monitor de progreso
+        let mut monitor = ProgressMonitor::new(scanner.scanned.clone(), scanner.found.clone());
+
+        // Tarea de monitoreo de progreso
+        let scanner_clone = scanner.clone();
+        tokio::spawn(async move {
+            loop {
+                sleep(Duration::from_millis(500)).await;
+                let (pps, scanned, found, _) = monitor.get_stats();
+                ui::display_progress(pps, scanned, found);
+                
+                if !scanner_clone.is_scanning() {
+                    break;
+                }
+            }
+        });
+
+        // Procesar resultados
+        let start_time = std::time::Instant::now();
+        while let Some(result) = rx.recv().await {
+            let _current_found = scanner.increment_found();
+
+            // Mostrar en consola
+            ui::display_server(&result.info, &result.provider);
+
+            // Exportar resultado
+            if let Err(e) = exporter.export(&result.info, &result.provider) {
+                eprintln!("   ⚠️  Error exportando: {}", e);
+            }
+
+            // Guardar en base de datos si está habilitada
+            #[cfg(feature = "mongodb")]
+            if let Some(ref client) = db_client {
+                if let Err(e) = client.save_server(&result.info, &result.provider).await {
+                    eprintln!("   ⚠️  Error guardando en BD: {}", e);
+                }
+            }
+
+            // Verificar si se alcanzó el objetivo
+            if scanner.target_reached() {
+                scanner.stop();
                 let duration = start_time.elapsed();
-                let scanned = total_scanned.load(Ordering::Relaxed);
-                println!("\n   {} Objetivo alcanzado.", "🏁".green());
-                println!("   {} Tiempo total: {:?}.", "⏱️".cyan(), duration);
-                println!("   {} IPs verificadas: {}.", "🔍".magenta(), format_count(scanned));
-                println!("\n   {} Presiona [ENTER] para volver al menú principal...", "👉".yellow());
-                let _ = std::io::stdout().flush();
-                let mut temp = String::new();
-                let _ = std::io::stdin().read_line(&mut temp);
-                return_to_menu = true;
+                let scanned = scanner.scanned_count();
+                ui::show_scan_complete(duration, scanned);
+                
+                // Mostrar stats finales de BD
+                #[cfg(feature = "mongodb")]
+                if let Some(ref client) = db_client {
+                    if let Ok(stats) = client.get_stats().await {
+                        println!("   📊 Total en BD: {} servidores", stats.total_servers);
+                    }
+                }
+                
+                ui::pause();
                 break;
             }
         }
-    }
-    if return_to_menu {
-        continue;
+
+        // Si el receiver se cerró, continuar al menú
     }
 }
+
+/// Maneja el modo de verificación de un solo servidor
+async fn handle_check_mode(ip: std::net::Ipv4Addr) {
+    if let Some(info) = check_server(ip, 300, 400).await {
+        println!("{}", "   ╭──────────────────────────────────────────────────────────────────────────╮".red());
+        println!(
+            "   🔥  IP: {:<15} 🏢  HOST: {:<20}",
+            info.ip.cyan(),
+            info.domain.yellow()
+        );
+        println!(
+            "   🛠️   VER: {:<15} 👥  PLAYERS: {}/{}",
+            info.version.green(),
+            info.online_players.to_string().white(),
+            info.max_players.to_string().white()
+        );
+        println!("   📝  MOTD: {:<50}", info.motd.white());
+        println!("{}", "   ╰──────────────────────────────────────────────────────────────────────────╯".red());
+    } else {
+        println!("{}", "OFFLINE".red());
+    }
 }
+
+/// Maneja la verificación de actualizaciones
+async fn handle_check_updates() {
+    match updater::check_for_updates().await {
+        Ok(info) => {
+            updater::display_update_info(&info);
+            if !info.update_available {
+                println!("{}", "✅ Estás usando la última versión".green());
+            }
+        }
+        Err(e) => {
+            eprintln!("{} {}", "❌ Error verificando actualizaciones:".red(), e);
+        }
+    }
+}
+
+/// Maneja la actualización automática
+async fn handle_update() {
+    match updater::run_updater().await {
+        Ok(_) => {
+            println!();
+            println!("{}", "═══════════════════════════════════════════════════".green());
+            println!("{}", "   ✅ Actualización completada exitosamente".green().bold());
+            println!("{}", "═══════════════════════════════════════════════════".green());
+            std::process::exit(0);
+        }
+        Err(e) => {
+            eprintln!();
+            eprintln!("{}", "═══════════════════════════════════════════════════".red());
+            eprintln!("{} {}", "   ❌ Error durante la actualización:".red(), e);
+            eprintln!("{}", "═══════════════════════════════════════════════════".red());
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Crea una configuración por defecto en caso de error
+fn create_default_config() -> Config {
+    use copenheimer_oxide::config::*;
+
+    Config {
+        scan: ScanConfig {
+            timeout_ms: 300,
+            read_timeout_ms: 400,
+            port: 25565,
+            workers: 65000,
+        },
+        output: OutputConfig {
+            format: "txt".to_string(),
+            file: "hits_omega.txt".to_string(),
+            timestamp_filename: false,
+        },
+        filters: FilterConfig {
+            min_players: 0,
+            country: String::new(),
+        },
+        cidr_ranges: CidrRangesConfig {
+            ranges: vec![
+                "51.0.0.0/8:OVH/Gaming:EU".to_string(),
+                "144.76.0.0/16:Hetzner DE:DE".to_string(),
+                "51.254.0.0/15:OVH Game:FR".to_string(),
+                "181.0.0.0/8:Residencial LATAM:LATAM".to_string(),
+                "190.0.0.0/8:Residencial LATAM:LATAM".to_string(),
+            ],
+        },
+        intensity: IntensityConfig {
+            home: 5000,
+            pro: 25000,
+            nitro: 400000,
+        },
+        logging: LoggingConfig {
+            level: "info".to_string(),
+            show_pps: true,
+            pps_update_interval: 500,
+        },
+    }
+}
+

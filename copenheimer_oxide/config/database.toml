@@ -1,0 +1,43 @@
+# Configuración de Base de Datos
+# Permite almacenar resultados de escaneo en diferentes proveedores
+
+# Habilitar/deshabilitar almacenamiento en BD
+enabled = false
+
+# Proveedor: "mongodb", "postgresql", "mysql", "sqlite"
+provider = "mongodb"
+
+# String de conexión
+# MongoDB Atlas ejemplo:
+# "mongodb+srv://usuario:contraseña@cluster.mongodb.net/?retryWrites=true&w=majority"
+# 
+# MongoDB local ejemplo:
+# "mongodb://localhost:27017"
+#
+# PostgreSQL ejemplo:
+# "postgresql://usuario:contraseña@localhost:5432/copenheimer"
+connection_string = ""
+
+# Nombre de la base de datos
+database_name = "copenheimer"
+
+# Nombre de la colección/tabla
+collection_name = "servers"
+
+# ============================================================================
+# EJEMPLO DE CONFIGURACIÓN PARA MONGODB ATLAS
+# ============================================================================
+# 
+# 1. Crea una cuenta en https://www.mongodb.com/cloud/atlas
+# 2. Crea un cluster gratuito
+# 3. Crea un usuario de base de datos
+# 4. Obtén tu connection string
+# 5. Reemplaza <password> con tu contraseña
+# 6. Establece enabled = true
+#
+# enabled = true
+# provider = "mongodb"
+# connection_string = "mongodb+srv://usuario:contraseña@cluster0.xxxxx.mongodb.net/?retryWrites=true&w=majority"
+# database_name = "copenheimer"
+# collection_name = "minecraft_servers"
+# ============================================================================

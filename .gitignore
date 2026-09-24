@@ -1,0 +1,35 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+Cargo.lock
+
+# Binarios compilados
+*.exe
+!copenheimer_windows.exe
+copenheimer_linux
+copenheimer_termux
+*.dll
+*.so
+*.dylib
+
+# Archivos de salida
+hits_*.txt
+found_*.txt
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Config local
+config/local.toml
+
+# Temporales
+tmp/
+temp/
+*.tmp

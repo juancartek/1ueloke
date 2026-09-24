@@ -1,0 +1,82 @@
+# Configuración de COPENHEIMER
+
+[scan]
+# Timeout de conexión en milisegundos
+timeout_ms = 300
+
+# Timeout de lectura en milisegundos
+read_timeout_ms = 400
+
+# Puerto de Minecraft por defecto
+port = 25565
+
+# Número de workers concurrentes (será sobrescrito por intensidad)
+workers = 65000
+
+[output]
+# Formato de salida: txt, json, csv
+format = "txt"
+
+# Archivo de salida
+file = "hits_omega.txt"
+
+# Incluir timestamp en nombre de archivo
+timestamp_filename = false
+
+[filters]
+# Filtrar por jugadores mínimos (0 = sin filtro)
+min_players = 0
+
+# Filtrar por país (vacío = sin filtro)
+country = ""
+
+[cidr_ranges]
+# Rangos CIDR a escanear
+# Formato: "ip/bits:provider:country"
+
+ranges = [
+    "181.0.0.0/8:Residencial LATAM:LATAM",
+    "190.0.0.0/8:Residencial LATAM:LATAM",
+    "200.0.0.0/8:Residencial LATAM:LATAM",
+    "70.0.0.0/8:Residencial US:US",
+    "80.0.0.0/8:Residencial EU:EU",
+    "51.254.0.0/15:OVH Game:FR",
+    "144.76.0.0/16:Hetzner DE:DE",
+    "129.146.0.0/16:Oracle Cloud US:US",
+    "150.136.0.0/16:Oracle Cloud US:US",
+    "37.187.0.0/16:Aternos/OVH:DE",
+    "51.0.0.0/8:OVH/Gaming:EU",
+    "15.235.0.0/16:OVH/PebbleHost:CA",
+    "15.204.0.0/16:OVH/Gaming:US",
+    "66.70.0.0/16:OVH/Bisect:CA",
+    "135.148.0.0/16:OVH/Sparked:US",
+    "135.125.0.0/16:OVH:EU",
+    "95.216.0.0/15:Hetzner/Minehost:FI",
+    "161.97.0.0/16:Contabo:DE",
+    "31.220.0.0/16:Hostinger:NL",
+    "185.150.188.0/22:Shockbyte:EU",
+    "192.187.104.0/21:MelonCube:US",
+    "198.50.141.0/24:Apex Hosting:CA",
+    "45.35.0.0/16:ReliableSite:US",
+    "147.135.0.0/16:OVH/Game:US",
+]
+
+[intensity]
+# Intensidades predefinidas
+# home = conexiones domésticas
+# pro = fibra óptica
+# nitro = VPS/dedicados
+
+home = 5000
+pro = 25000
+nitro = 400000
+
+[logging]
+# Nivel de logging: debug, info, warn, error
+level = "info"
+
+# Mostrar PPS (packets per second) en consola
+show_pps = true
+
+# Intervalo de actualización de PPS en milisegundos
+pps_update_interval = 500
